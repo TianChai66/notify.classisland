@@ -3,7 +3,7 @@ name: Uri弹窗显示
 description: 通过 classisland://plugins/notify 外部调用来触发弹窗提醒，支持长文本本地传递与滚动显示。
 entranceAssembly: "UriNotifyPlugin.dll"
 apiVersion: 2.0.0.0
-url: none
+url: https://github.com/TianChai66/notify.classisland
 author: 菜
 version: 0.1.0.beta
 icon: icon.png
