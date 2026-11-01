@@ -9,15 +9,24 @@ public static class NotifyFileParser
 {
     public static bool LooksLikeGroupFormat(string content)
     {
-        // 👑 核心判定：必须找到带 % 的行首（允许前面有空格），且带有冒号或括号
-        return Regex.IsMatch(content, @"^\s*%(?:text|通知)\s*\{?\s*\d+\s*\}?\s*[:：(（]", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+        // 👑 核心修复 1：干掉可能存在的 UTF-8 BOM 头
+        content = content.TrimStart('\uFEFF');
+
+        // 1. 匹配纯英文格式：text{1}( 或 text1:
+        bool isEnglish = Regex.IsMatch(content, @"^\s*text\s*\{?\s*\d+\s*\}?\s*[:(]", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+        
+        // 2. 匹配中文极简格式：%通知1：
+        bool isChinese = Regex.IsMatch(content, @"^\s*%\s*通知\s*\{?\s*\d+\s*\}?\s*[:：]", RegexOptions.Multiline);
+
+        return isEnglish || isChinese;
     }
 
     public static List<NotifyGroup> Parse(string content)
     {
-        // ==========================================
+        // 👑 核心修复 2：解析前也干掉 BOM 头
+        content = content.TrimStart('\uFEFF');
+
         // 1. 预处理：全角转半角
-        // ==========================================
         content = content
             .Replace('：', ':')
             .Replace('｛', '{')
@@ -39,13 +48,9 @@ public static class NotifyFileParser
             
             if (string.IsNullOrEmpty(line) || line == ")" || line == "）") continue;
 
-            // ==========================================
-            // 2. 检查是否是新组的开头
-            // 👑 必须带有 % 号才能触发新组！(为了兼容老英文格式，允许 text{1}( 这种形式不需要 %)
-            // ==========================================
+            // 2. 新组开头
             var headerMatch = Regex.Match(line, @"^(?:%|％)?(?:通知|text)\s*\{?\s*(\d+)\s*\}?[\s(:]*$", RegexOptions.IgnoreCase);
             
-            // 如果匹配成功，且 (以 % 开头 或者 是纯英文的 text{Num}( 老格式)
             if (headerMatch.Success && (line.StartsWith("%") || line.StartsWith("％") || line.ToLower().StartsWith("text")))
             {
                 if (current != null && (!string.IsNullOrEmpty(current.Msg) || !string.IsNullOrEmpty(current.MaskMsg)))
@@ -61,9 +66,7 @@ public static class NotifyFileParser
 
             if (current == null) continue;
 
-            // ==========================================
-            // 3. 解析模式 (忽略大小写)
-            // ==========================================
+            // 3. 模式
             var m = Regex.Match(line, @"^(?:模式|mode)\s*:\s*\{(滚动|静态|text|rolling)\}$", RegexOptions.IgnoreCase);
             if (m.Success)
             {
@@ -72,9 +75,7 @@ public static class NotifyFileParser
                 continue;
             }
 
-            // ==========================================
-            // 4. 解析语音 (忽略大小写)
-            // ==========================================
+            // 4. 语音
             m = Regex.Match(line, @"^(?:语音|speech)\s*:\s*\{(否|是|0|1|true|false)\}$", RegexOptions.IgnoreCase);
             if (m.Success)
             {
@@ -83,9 +84,7 @@ public static class NotifyFileParser
                 continue;
             }
 
-            // ==========================================
-            // 5. 解析遮罩行 (严格区分大小写 Msg)
-            // ==========================================
+            // 5. 遮罩行
             bool isMaskLine = line.Contains("遮罩:") || Regex.IsMatch(line, @"(?<![A-Za-z])Msg\s*:");
             if (isMaskLine)
             {
@@ -104,9 +103,7 @@ public static class NotifyFileParser
                 continue;
             }
 
-            // ==========================================
-            // 6. 解析正文行 (严格区分大小写 msg)
-            // ==========================================
+            // 6. 正文行
             bool isMsgLine = line.Contains("正文:") || Regex.IsMatch(line, @"(?<![A-Za-z])msg\s*:");
             if (isMsgLine)
             {
