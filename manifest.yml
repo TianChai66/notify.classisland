@@ -5,6 +5,6 @@ entranceAssembly: "UriNotifyPlugin.dll"
 apiVersion: 2.0.0.0
 url: https://github.com/TianChai66/notify.classisland
 author: 菜
-version: 0.1.0.beta
+version: 0.2.0-beta
 icon: icon.png
 readme: README.md

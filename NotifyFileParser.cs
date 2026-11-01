@@ -9,141 +9,135 @@ public static class NotifyFileParser
 {
     public static bool LooksLikeGroupFormat(string content)
     {
-        return Regex.IsMatch(content, @"text\{\d+\}");
+        // 👑 核心判定：必须找到带 % 的行首（允许前面有空格），且带有冒号或括号
+        return Regex.IsMatch(content, @"^\s*%(?:text|通知)\s*\{?\s*\d+\s*\}?\s*[:：(（]", RegexOptions.Multiline | RegexOptions.IgnoreCase);
     }
 
     public static List<NotifyGroup> Parse(string content)
     {
+        // ==========================================
+        // 1. 预处理：全角转半角
+        // ==========================================
+        content = content
+            .Replace('：', ':')
+            .Replace('｛', '{')
+            .Replace('｝', '}')
+            .Replace('（', '(')
+            .Replace('）', ')')
+            .Replace('“', '"')
+            .Replace('”', '"')
+            .Replace('，', ',');
+
         var groups = new List<NotifyGroup>();
+        NotifyGroup? current = null;
 
-        var parts = content.Split(new[] { "text{" }, StringSplitOptions.RemoveEmptyEntries);
-
-        foreach (var part in parts)
-        {
-            int openIdx = part.IndexOf('(');
-            if (openIdx < 0) continue;
-
-            string header = part.Substring(0, openIdx).Trim().TrimEnd('}').Trim();
-            if (!int.TryParse(header, out int index)) continue;
-
-            int closeIdx = part.LastIndexOf(')');
-            if (closeIdx < openIdx) continue;
-
-            string body = part.Substring(openIdx + 1, closeIdx - openIdx - 1);
-            var group = ParseBody(index, body);
-
-            if (!string.IsNullOrEmpty(group.Msg) || !string.IsNullOrEmpty(group.MaskMsg))
-                groups.Add(group);
-        }
-
-        groups.Sort((a, b) => a.Index.CompareTo(b.Index));
-        return groups;
-    }
-
-    private static NotifyGroup ParseBody(int index, string body)
-    {
-        var g = new NotifyGroup { Index = index };
-
-        // 按行拆分，逐行解析
-        var lines = body.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        var lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
         foreach (var rawLine in lines)
         {
             string line = rawLine.Trim();
-            if (string.IsNullOrEmpty(line)) continue;
+            
+            if (string.IsNullOrEmpty(line) || line == ")" || line == "）") continue;
 
-            // ---------- 全局参数行：mode ----------
-            var m = Regex.Match(line, @"^mode:\{(text|rolling)\}$", RegexOptions.IgnoreCase);
+            // ==========================================
+            // 2. 检查是否是新组的开头
+            // 👑 必须带有 % 号才能触发新组！(为了兼容老英文格式，允许 text{1}( 这种形式不需要 %)
+            // ==========================================
+            var headerMatch = Regex.Match(line, @"^(?:%|％)?(?:通知|text)\s*\{?\s*(\d+)\s*\}?[\s(:]*$", RegexOptions.IgnoreCase);
+            
+            // 如果匹配成功，且 (以 % 开头 或者 是纯英文的 text{Num}( 老格式)
+            if (headerMatch.Success && (line.StartsWith("%") || line.StartsWith("％") || line.ToLower().StartsWith("text")))
+            {
+                if (current != null && (!string.IsNullOrEmpty(current.Msg) || !string.IsNullOrEmpty(current.MaskMsg)))
+                {
+                    groups.Add(current);
+                }
+
+                current = new NotifyGroup();
+                if (int.TryParse(headerMatch.Groups[1].Value, out int idx))
+                    current.Index = idx;
+                continue;
+            }
+
+            if (current == null) continue;
+
+            // ==========================================
+            // 3. 解析模式 (忽略大小写)
+            // ==========================================
+            var m = Regex.Match(line, @"^(?:模式|mode)\s*:\s*\{(滚动|静态|text|rolling)\}$", RegexOptions.IgnoreCase);
             if (m.Success)
             {
-                g.Mode = m.Groups[1].Value.ToLowerInvariant();
+                var modeVal = m.Groups[1].Value;
+                current.Mode = (modeVal == "滚动" || modeVal.Equals("rolling", StringComparison.OrdinalIgnoreCase)) ? "rolling" : "text";
                 continue;
             }
 
-            // ---------- 全局参数行：speech ----------
-            m = Regex.Match(line, @"^speech:\{(true|false|1|0)\}$", RegexOptions.IgnoreCase);
+            // ==========================================
+            // 4. 解析语音 (忽略大小写)
+            // ==========================================
+            m = Regex.Match(line, @"^(?:语音|speech)\s*:\s*\{(否|是|0|1|true|false)\}$", RegexOptions.IgnoreCase);
             if (m.Success)
             {
-                var v = m.Groups[1].Value.ToLowerInvariant();
-                g.Speech = v == "true" || v == "1";
+                var s = m.Groups[1].Value.ToLower();
+                current.Speech = (s == "是" || s == "1" || s == "true");
                 continue;
             }
 
-            // ---------- 判断该行的类型 ----------
-            bool hasMaskDuration = line.Contains("maskDuration"); // 保持大小写敏感，用户按规范写即可
-            bool hasUpperMsg = Regex.IsMatch(line, @"(?<![A-Za-z])Msg:\{");
-            bool hasLowerMsg = Regex.IsMatch(line, @"(?<![A-Za-z])msg:\{");
-            bool hasDuration = line.Contains("duration");
-            
-            // 【修改点】只识别全小写的 scrollspeed
-            bool hasScrollSpeed = line.Contains("scrollspeed"); 
-            
-            bool hasTime = Regex.IsMatch(line, @"(?<![A-Za-z])time\b");
-
-            // ---------- 遮罩行：必须同时包含 maskDuration 和 Msg ----------
-            if (hasUpperMsg)
+            // ==========================================
+            // 5. 解析遮罩行 (严格区分大小写 Msg)
+            // ==========================================
+            bool isMaskLine = line.Contains("遮罩:") || Regex.IsMatch(line, @"(?<![A-Za-z])Msg\s*:");
+            if (isMaskLine)
             {
-                if (!hasMaskDuration) continue;
+                var mdMatch = Regex.Match(line, @"(?:遮罩时长|maskDuration)\s*\{?\s*([\d.]+)\s*\}?", RegexOptions.IgnoreCase);
+                if (mdMatch.Success && double.TryParse(mdMatch.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double md))
+                    current.MaskDuration = md;
 
-                var mdMatch = Regex.Match(line, @"maskDuration\s*:?\s*\{([0-9.]+)\}");
-                if (mdMatch.Success && double.TryParse(mdMatch.Groups[1].Value,
-                    NumberStyles.Float, CultureInfo.InvariantCulture, out double md))
-                {
-                    g.MaskDuration = md;
-                }
-
-                var msgMatch = Regex.Match(line, @"(?<![A-Za-z])Msg:\{""([^""]*?)""\}");
+                var msgMatch = Regex.Match(line, @"(?:遮罩|Msg)\s*:\s*\{([^}]*)\}");
                 if (msgMatch.Success)
                 {
-                    g.MaskMsg = msgMatch.Groups[1].Value;
+                    string rawText = msgMatch.Groups[1].Value;
+                    if (rawText.Length >= 2 && rawText.StartsWith("\"") && rawText.EndsWith("\""))
+                        rawText = rawText.Substring(1, rawText.Length - 2);
+                    current.MaskMsg = rawText;
                 }
                 continue;
             }
 
-            if (hasMaskDuration) continue;
-
-            // ---------- 正文行：必须包含 msg（小写） ----------
-            if (hasLowerMsg)
+            // ==========================================
+            // 6. 解析正文行 (严格区分大小写 msg)
+            // ==========================================
+            bool isMsgLine = line.Contains("正文:") || Regex.IsMatch(line, @"(?<![A-Za-z])msg\s*:");
+            if (isMsgLine)
             {
-                var msgMatch = Regex.Match(line, @"(?<![A-Za-z])msg:\{""([^""]*?)""\}");
+                var dMatch = Regex.Match(line, @"(?:时长|duration)\s*\{?\s*([\d.]+)\s*\}?", RegexOptions.IgnoreCase);
+                if (dMatch.Success && double.TryParse(dMatch.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double d))
+                    current.Duration = d;
+
+                var ssMatch = Regex.Match(line, @"(?:速度|scrollSpeed)\s*\{?\s*([\d.]+)\s*\}?", RegexOptions.IgnoreCase);
+                if (ssMatch.Success && double.TryParse(ssMatch.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double ss))
+                    current.ScrollSpeed = ss;
+
+                var tMatch = Regex.Match(line, @"(?:次数|time)\s*\{?\s*(\d+)\s*\}?", RegexOptions.IgnoreCase);
+                if (tMatch.Success && int.TryParse(tMatch.Groups[1].Value, out int t))
+                    current.Time = t;
+
+                var msgMatch = Regex.Match(line, @"(?:正文|msg)\s*:\s*\{([^}]*)\}");
                 if (msgMatch.Success)
                 {
-                    g.Msg = msgMatch.Groups[1].Value;
-                }
-
-                if (hasDuration)
-                {
-                    var dMatch = Regex.Match(line, @"duration\s*:?\s*\{([0-9.]+)\}");
-                    if (dMatch.Success && double.TryParse(dMatch.Groups[1].Value,
-                        NumberStyles.Float, CultureInfo.InvariantCulture, out double d))
-                    {
-                        g.Duration = d;
-                    }
-                }
-
-                // 【修改点】提取参数时，正则也只匹配全小写的 scrollspeed
-                if (hasScrollSpeed)
-                {
-                    var ssMatch = Regex.Match(line, @"scrollspeed\s*:?\s*\{([0-9.]+)\}");
-                    if (ssMatch.Success && double.TryParse(ssMatch.Groups[1].Value,
-                        NumberStyles.Float, CultureInfo.InvariantCulture, out double ss))
-                    {
-                        g.ScrollSpeed = ss;
-                    }
-                }
-
-                if (hasTime)
-                {
-                    var tMatch = Regex.Match(line, @"(?<![A-Za-z])time\s*:?\s*\{(\d+)\}");
-                    if (tMatch.Success && int.TryParse(tMatch.Groups[1].Value, out int t))
-                    {
-                        g.Time = t;
-                    }
+                    string rawText = msgMatch.Groups[1].Value;
+                    if (rawText.Length >= 2 && rawText.StartsWith("\"") && rawText.EndsWith("\""))
+                        rawText = rawText.Substring(1, rawText.Length - 2);
+                    current.Msg = rawText;
                 }
                 continue;
             }
         }
 
-        return g;
+        if (current != null && (!string.IsNullOrEmpty(current.Msg) || !string.IsNullOrEmpty(current.MaskMsg)))
+            groups.Add(current);
+
+        groups.Sort((a, b) => a.Index.CompareTo(b.Index));
+        return groups;
     }
 }

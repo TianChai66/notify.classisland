@@ -44,36 +44,39 @@ public class UriNavigationHandler : IHostedService
         try
         {
             var query = HttpUtility.ParseQueryString(uri.Query);
-            string mode = query["mode"] ?? "text";
-            string? id = query["id"];
-            string? customPath = query["path"];
-            string? directMsg = query["msg"];
-            string? maskMsg = query["maskMsg"];
 
-            double? userDuration = ParseNullableDouble(query["duration"]);
-            // 【修改点】只识别全小写的 scrollspeed
-            double? userScrollSpeed = ParseNullableDouble(query["scrollspeed"]);
-            
-            double maskDuration = ParseDouble(query["maskDuration"], 5.0);
-            int time = ParseInt(query["time"], 2);
-            bool speech = ParseBool(query["speech"], false);
+            // ==========================================
+            // 中文兼容解析（优先读取英文，若没有则读取中文）
+            // ==========================================
+            string mode = query["mode"] ?? query["模式"] ?? "text";
+            if (mode == "滚动") mode = "rolling";
+            if (mode == "静态") mode = "text";
+
+            string? id = query["id"] ?? query["编号"];
+            string? customPath = query["path"] ?? query["路径"];
+            string? directMsg = query["msg"] ?? query["正文"];
+            string? maskMsg = query["maskMsg"] ?? query["遮罩"];
+
+            double? userDuration = ParseNullableDouble(query["duration"] ?? query["时长"]);
+            double maskDuration = ParseDouble(query["maskDuration"] ?? query["遮罩时长"], 5.0);
+            double scrollSpeed = ParseDouble(query["scrollSpeed"] ?? query["速度"], 1.0);
+            int time = ParseInt(query["time"] ?? query["次数"], 2);
+
+            string? speechStr = query["speech"] ?? query["语音"];
+            if (speechStr == "是") speechStr = "true";
+            if (speechStr == "否") speechStr = "false";
+            bool speech = ParseBool(speechStr, false);
 
             var provider = MyNotificationProvider.Current;
             if (provider == null) return;
 
-            // 优先级：path > id > msg/maskMsg
-
-            // 情形 1：path 指向文件
+            // 优先级：path > id > msg
             if (!string.IsNullOrEmpty(customPath))
             {
                 string? fileContent = LoadTextFromPath(customPath);
                 if (fileContent == null)
                 {
-                    // 读取失败时用 maskMsg 兜底
-                    if (!string.IsNullOrEmpty(maskMsg) || !string.IsNullOrEmpty(directMsg))
-                        HandleDirect(provider, mode, maskMsg, directMsg, maskDuration, userDuration, userScrollSpeed, time, speech);
-                    else
-                        provider.ShowGroup(new NotifyGroup { MaskMsg = "无法读取指定路径文件。", MaskDuration = 2 });
+                    provider.ShowGroup(new NotifyGroup { MaskMsg = "无法读取指定路径文件。", MaskDuration = 2 });
                     return;
                 }
 
@@ -89,7 +92,6 @@ public class UriNavigationHandler : IHostedService
                     return;
                 }
 
-                // 普通单条文本文件（整段内容作为一条通知处理）
                 provider.ShowGroup(new NotifyGroup
                 {
                     Mode = mode,
@@ -97,14 +99,13 @@ public class UriNavigationHandler : IHostedService
                     MaskMsg = maskMsg,
                     MaskDuration = maskDuration,
                     Duration = userDuration,
-                    ScrollSpeed = userScrollSpeed,
+                    ScrollSpeed = scrollSpeed,
                     Time = time,
                     Speech = speech,
                 });
                 return;
             }
 
-            // 情形 2：id 引用临时文件
             if (!string.IsNullOrEmpty(id))
             {
                 string text = LoadTextFromLocal(id) ?? "无法读取消息内容，请检查标识符是否有效。";
@@ -115,15 +116,15 @@ public class UriNavigationHandler : IHostedService
                     MaskMsg = maskMsg,
                     MaskDuration = maskDuration,
                     Duration = userDuration,
-                    ScrollSpeed = userScrollSpeed,
+                    ScrollSpeed = scrollSpeed,
                     Time = time,
                     Speech = speech,
                 });
                 return;
             }
 
-            // 情形 3：直接 URI 参数
-            HandleDirect(provider, mode, maskMsg, directMsg, maskDuration, userDuration, userScrollSpeed, time, speech);
+            // 直接 URI 参数
+            HandleDirect(provider, mode, maskMsg, directMsg, maskDuration, userDuration, scrollSpeed, time, speech);
         }
         catch
         {
